@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>BTC 15-Min Kalshi Monitor</title>
+<style>
+:root{--bg:#0b0f14;--card:#121821;--line:#27313d;--text:#f4f7fb;--muted:#8d9aaa;--green:#34d399;--red:#fb7185;--yellow:#fbbf24;--blue:#60a5fa}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif}
+main{max-width:760px;margin:auto;padding:18px 14px 35px}
+h1{font-size:25px;margin:4px 0 3px}.sub{color:var(--muted);margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:10px}
+.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.big{font-size:28px;font-weight:700;margin-top:5px}.value{font-size:18px;font-weight:650;margin-top:5px}
+.row{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:7px 0}
+.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.blue{color:var(--blue)}
+.status{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--red)}.dot.on{background:var(--green)}
+button{border:1px solid var(--line);background:#18212c;color:var(--text);border-radius:11px;padding:9px 12px;font-weight:650}
+button:active{transform:scale(.98)}
+.bar{height:8px;background:#222c38;border-radius:99px;overflow:hidden;margin-top:8px}.fill{height:100%;background:var(--blue);width:0}
+.small{font-size:12px;color:var(--muted);line-height:1.45}
+pre{white-space:pre-wrap;word-break:break-word;color:#ffb4b4;font-size:11px}
+canvas{width:100%;height:180px;background:#0e141b;border-radius:12px;margin-top:8px}
+footer{color:var(--muted);font-size:11px;text-align:center;margin-top:12px}
+@media(max-width:480px){.grid{grid-template-columns:1fr 1fr}.big{font-size:24px}}
+</style>
+</head>
+<body>
+<main>
+  <h1>BTC 15-Min Monitor</h1>
+  <div class="sub">Kraken spot + Kalshi KXBTC15M + Kalshi/CF Benchmarks settlement index</div>
+
+  <div class="card">
+    <div class="row">
+      <div class="status"><span id="kdot" class="dot"></span><span id="status">Connecting…</span></div>
+      <button id="refresh">Refresh market</button>
+    </div>
+    <div class="row"><span class="label">15-minute window</span><strong id="countdown">--:--</strong></div>
+    <div class="bar"><div id="timefill" class="fill"></div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Kraken BTC/USD</div><div id="kraken" class="big">—</div><div id="krakenMove" class="small">Waiting…</div></div>
+    <div class="card"><div class="label">Kalshi settlement index</div><div id="index" class="big">—</div><div id="indexMove" class="small">Waiting…</div></div>
+    <div class="card"><div class="label">Kalshi target / strike</div><div id="strike" class="value">—</div><div id="distance" class="small">—</div></div>
+    <div class="card"><div class="label">Kalshi market</div><div id="ticker" class="value">—</div><div id="marketTitle" class="small">—</div></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Kalshi contract</div>
+    <div class="grid" style="margin-top:8px">
+      <div><div class="label">YES bid</div><div id="yb" class="big green">—</div></div>
+      <div><div class="label">YES ask</div><div id="ya" class="big green">—</div></div>
+      <div><div class="label">NO bid</div><div id="nb" class="big red">—</div></div>
+      <div><div class="label">NO ask</div><div id="na" class="big red">—</div></div>
+    </div>
+    <div class="row"><span>Last</span><strong id="last">—</strong></div>
+    <div class="row"><span>24h volume</span><strong id="vol">—</strong></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Live price trace</div>
+    <canvas id="chart" width="700" height="180"></canvas>
+    <div class="small">Trace is local to this page session. It is not stored or sent anywhere.</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Connection diagnostics</div>
+    <div class="row"><span>Kraken WebSocket</span><span id="ks" class="small">—</span></div>
+    <div class="row"><span>Kalshi REST</span><span id="kals" class="small">—</span></div>
+    <div class="row"><span>Kalshi/CF index</span><span id="cis" class="small">—</span></div>
+    <div class="small" style="margin-top:8px">If a source is blocked by Safari/CORS, the dashboard will identify it instead of silently substituting a different price.</div>
+  </div>
+
+  <div id="error" style="display:none" class="card"><div class="label red">Error</div><pre id="err"></pre></div>
+  <footer>Market data only. This page does not place trades.</footer>
+</main>
+
+<script>
+"use strict";
+
+const KALSHI = "https://external-api.kalshi.com/trade-api/v2";
+const CF_INDEX = "https://kalshi-public-docs.s3.amazonaws.com/external/crypto/btc_current.json";
+const SERIES = "KXBTC15M";
+let ws, market=null, indexPrice=null, krakenPrice=null;
+let windowOpen=0, windowClose=0, windowStartPrice=null, indexStartPrice=null;
+let trace=[], lastMarketFetch=0;
+
+const $ = id => document.getElementById(id);
+const money = x => Number.isFinite(x) ? "$"+x.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : "—";
+const cents = x => Number.isFinite(x) ? (x*100).toFixed(1)+"¢" : "—";
+const pct = x => Number.isFinite(x) ? (x>=0?"+":"")+x.toFixed(3)+"%" : "—";
+
+function showError(e){
+  $("error").style.display="block";
+  $("err").textContent=String(e && e.message ? e.message : e);
+}
+function setStatus(text,on=false){$("status").textContent=text;$("kdot").className="dot"+(on?" on":"");}
+function setDiag(id,text,on=false){$(id).textContent=text;$(id).className="small "+(on?"green":"red");}
+
+async function getJSON(url){
+  const r=await fetch(url,{cache:"no-store"});
+  if(!r.ok) throw new Error(`${r.status} ${r.statusText} — ${url}`);
+  return r.json();
+}
+
+async function refreshMarket(){
+  try{
+    const data=await getJSON(`${KALSHI}/markets?series_ticker=${SERIES}&status=open&limit=1000`);
+    const now=Date.now();
+    const candidates=(data.markets||[]).filter(m=>{
+      const o=Date.parse(m.open_time), c=Date.parse(m.close_time);
+      return o<=now && now<c;
+    }).sort((a,b)=>Date.parse(a.close_time)-Date.parse(b.close_time));
+    if(!candidates.length) throw new Error("No currently-open KXBTC15M market returned.");
+    market=candidates[0];
+    windowOpen=Date.parse(market.open_time);
+    windowClose=Date.parse(market.close_time);
+    $("ticker").textContent=market.ticker;
+    $("marketTitle").textContent=market.title || market.subtitle || "BTC 15-minute market";
+    $("strike").textContent = market.floor_strike!=null ? money(Number(market.floor_strike)) : "See title";
+    updateMarketUI();
+    setDiag("kals","LIVE",true);
+    lastMarketFetch=Date.now();
+    setStatus("Live market connected",true);
+  }catch(e){
+    setDiag("kals","ERROR");
+    showError(e);
+  }
+}
+
+function updateMarketUI(){
+  if(!market)return;
+  const n=v=>v==null?NaN:Number(v);
+  $("yb").textContent=cents(n(market.yes_bid_dollars));
+  $("ya").textContent=cents(n(market.yes_ask_dollars));
+  $("nb").textContent=cents(n(market.no_bid_dollars));
+  $("na").textContent=cents(n(market.no_ask_dollars));
+  $("last").textContent=cents(n(market.last_price_dollars));
+  $("vol").textContent=n(market.volume_24h_fp).toLocaleString();
+  const s=n(market.floor_strike);
+  if(Number.isFinite(indexPrice)&&Number.isFinite(s)){
+    const d=(indexPrice-s)/s*100;
+    $("distance").textContent=(d>=0?"+":"")+d.toFixed(4)+"% vs target";
+    $("distance").className="small "+(d>=0?"green":"red");
+  }
+}
+
+function connectKraken(){
+  try{
+    ws=new WebSocket("wss://ws.kraken.com/v2");
+    ws.onopen=()=>{
+      setDiag("ks","LIVE",true);
+      ws.send(JSON.stringify({method:"subscribe",params:{channel:"ticker",symbol:["BTC/USD"],snapshot:true}}));
+    };
+    ws.onmessage=ev=>{
+      const msg=JSON.parse(ev.data);
+      if(msg.channel==="ticker" && msg.data?.length){
+        const t=msg.data[0];
+        const p=Number(t.last ?? t.last_price ?? t.price);
+        if(Number.isFinite(p)){
+          krakenPrice=p;
+          $("kraken").textContent=money(p);
+          if(windowStartPrice==null && windowOpen && Date.now()>=windowOpen) windowStartPrice=p;
+          $("krakenMove").textContent=windowStartPrice?pct((p/windowStartPrice-1)*100):"Window baseline pending";
+          addTrace(p);
+        }
+      }
+    };
+    ws.onerror=()=>setDiag("ks","ERROR");
+    ws.onclose=()=>{setDiag("ks","DISCONNECTED");setTimeout(connectKraken,2500)};
+  }catch(e){showError(e)}
+}
+
+async function pollCFIndex(){
+  try{
+    const d=await getJSON(CF_INDEX);
+    // Accept several possible field layouts so minor feed schema changes don't break the page.
+    const p=Number(d.price ?? d.index_price ?? d.value ?? d.data?.price ?? d.data?.value);
+    const ts=Number(d.timestamp ?? d.ts ?? d.data?.timestamp);
+    if(!Number.isFinite(p)) throw new Error("CF/Kalshi BTC index response did not contain a recognizable price field.");
+    indexPrice=p;
+    $("index").textContent=money(p);
+    if(indexStartPrice==null && windowOpen && Date.now()>=windowOpen) indexStartPrice=p;
+    $("indexMove").textContent=indexStartPrice?pct((p/indexStartPrice-1)*100):"Window baseline pending";
+    $("cis").textContent=ts?"LIVE":"LIVE";
+    $("cis").className="small green";
+    updateMarketUI();
+  }catch(e){
+    setDiag("cis","ERROR");
+    // Don't spam the visible error box every second.
+    $("cis").title=String(e);
+  }
+}
+
+function resetWindowIfNeeded(){
+  if(market && Date.now()>=windowClose){
+    windowStartPrice=null; indexStartPrice=null;
+    refreshMarket();
+  }
+}
+
+function tick(){
+  resetWindowIfNeeded();
+  if(windowOpen && windowClose){
+    const now=Date.now(), remain=Math.max(0,windowClose-now), total=Math.max(1,windowClose-windowOpen);
+    const sec=Math.floor(remain/1000);
+    $("countdown").textContent=`${String(Math.floor(sec/60)).padStart(2,"0")}:${String(sec%60).padStart(2,"0")}`;
+    $("timefill").style.width=Math.min(100,Math.max(0,((now-windowOpen)/total)*100))+"%";
+  }
+}
+
+function addTrace(p){
+  trace.push({t:Date.now(),p});
+  if(trace.length>180) trace.shift();
+  draw();
+}
+function draw(){
+  const c=$("chart"),x=c.getContext("2d"),w=c.width,h=c.height;
+  x.clearRect(0,0,w,h);
+  if(trace.length<2)return;
+  const vals=trace.map(a=>a.p), lo=Math.min(...vals), hi=Math.max(...vals), pad=(hi-lo)||1;
+  x.beginPath();
+  trace.forEach((a,i)=>{
+    const xx=i/(trace.length-1)*w, yy=h-12-(a.p-lo)/pad*(h-24);
+    i?x.lineTo(xx,yy):x.moveTo(xx,yy);
+  });
+  x.strokeStyle="#60a5fa";x.lineWidth=2;x.stroke();
+}
+
+$("refresh").onclick=refreshMarket;
+refreshMarket();
+connectKraken();
+pollCFIndex();
+setInterval(pollCFIndex,1000);
+setInterval(refreshMarket,10000);
+setInterval(tick,250);
+</script>
+</body>
+</html>
